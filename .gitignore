@@ -1,3 +1,4 @@
 *.txt
 __pycache__
 cpp_skeleton
+.DS_store
