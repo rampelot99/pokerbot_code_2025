@@ -61,7 +61,7 @@ class Player(Bot):
         """
         return any(card[0] == self.bounty_rank for card in my_cards + board_cards)
 
-    def predict_opponent_action(self, game_state, round_state, active):
+    def predict_action(self, game_state, round_state, active):
         """
         Predict the opponent's next action using the machine learning model.
         """
@@ -125,7 +125,7 @@ class Player(Bot):
         strength = self.calculate_strength(my_cards, board_cards)
         bounty_play = self.should_play_for_bounty(my_cards, board_cards)
 
-        predicted_action = self.predict_opponent_action(game_state, round_state, active)
+        predicted_action = self.predict_action(game_state, round_state, active)
 
         if RaiseAction in legal_actions:
             min_raise, max_raise = round_state.raise_bounds()
