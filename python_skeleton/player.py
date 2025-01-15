@@ -10,6 +10,7 @@ from skeleton.runner import parse_args, run_bot
 import random
 
 import eval7
+from deuces import Deck, Evaluator, Card
 
 
 class Player(Bot):
@@ -97,43 +98,69 @@ class Player(Bot):
         # define amount of times we want to do monte-carlo iterations
         MC_ITER = 100
         
-        my_cards = [eval7.Card(card) for card in my_cards]
-        
-        board_cards = [eval7.Card(card) for card in board_cards]
-
-        deck = eval7.Deck()
-        
-        for card in my_cards + board_cards:
-            deck.cards.remove(card)
+        deck = Deck()
+        evaluator = Evaluator()
+        my_hand = [Card.new(card) for card in my_cards]
+        community_cards = [Card.new(card) for card in board_cards]
             
         score = 0
         for _ in range(MC_ITER):
             
             deck.shuffle()
+            for card in my_hand + community_cards:
+                deck.cards.remove(card)
+
+            opp_draw = deck.draw(2)
             
-            draw_number = 2 + (5 - len(board_cards))
-            draw = deck.peek(draw_number)
+            my_value = evaluator.evaluate(my_hand, community_cards)
+            opp_value = evaluator.evaluate(opp_draw, community_cards)
             
-            opp_draw = draw[:2] #first two cards
-            board_draw = draw[2:] # everything after first two cards
-            
-            my_hand = my_cards + board_cards + board_draw
-            opp_hand = opp_draw + board_cards + board_draw
-            
-            my_value = eval7.evaluate(my_hand)
-            opp_value = eval7.evaluate(opp_hand)
-            
-            if my_value > opp_value:
-                score += 1
-            elif my_value < opp_value:
-                score += 0
-            else:
-                score += 0.5
+            score += (opp_value - my_value)*0.2
         
         win_rate = score / MC_ITER
         print(f"win rate: {win_rate}")
         
         return win_rate
+    
+    def calculate_pot_odds(self, my_cards, board_cards):
+        '''
+        Count the number of cards that complete our hand (outs)
+        Multiply this number by 2 (1/52 cards gives ~2% chance of getting a specific
+        card)
+        If we have two cards left to see (turn and river), multiply by 2
+        '''
+        deck = Deck()
+        evaluator = Evaluator()
+        my_hand = [Card.new(card) for card in my_cards]
+        community_cards = [Card.new(card) for card in board_cards]
+        card_num = len(board_cards)
+        # Remove known cards from the deck
+        known_cards = my_hand + community_cards
+        for card in known_cards:
+            deck.cards.remove(card)
+
+        # Simulate the turn and river (all combinations of unseen cards)
+        outs_count = 0
+        if card_num == 3:
+            for turn_card in deck.cards:
+                for river_card in [c for c in deck.cards if c != turn_card]:
+                    full_community = community_cards + [turn_card, river_card]
+                    rank = evaluator.evaluate(my_hand, full_community)
+                    # Consider high-ranking thresholds (e.g., less than 5000 is usually strong)
+                    if rank <= 5000:  # Adjust threshold for your definition of a "high" rank
+                        outs_count += 1
+            return 4 * outs_count
+        # Simulate river
+        elif card_num == 4:
+            for river_card in deck.cards:
+                full_community = community_cards + [river_card]
+                rank = evaluator.evaluate(my_hand, full_community)
+                # Consider high-ranking thresholds (e.g., less than 5000 is usually strong)
+                if rank <= 5000:  # Adjust threshold for your definition of a "high" rank
+                    outs_count += 1
+            return 2 * outs_count
+        # know all our cards
+        return evaluator.evaluate(my_hand, community_cards)
 
 
     def get_action(self, game_state, round_state, active):
@@ -162,7 +189,12 @@ class Player(Bot):
         my_contribution = STARTING_STACK - my_stack  # the number of chips you have contributed to the pot
         opp_contribution = STARTING_STACK - opp_stack  # the number of chips your opponent has contributed to the pot
 
-        strength = self.calculate_strength(my_cards, board_cards)
+        strength = 0
+        if len(board_cards) == 5:
+            strength = self.calculate_strength(my_cards, board_cards)
+        elif len(board_cards) > 2:
+            strength = self.calculate_pot_odds(my_cards, board_cards)
+
         pot_odds = continue_cost / (my_pip + opp_pip + 0.1)
         
         if RaiseAction in legal_actions:
@@ -184,7 +216,7 @@ class Player(Bot):
         
         if RaiseAction in legal_actions:
             if random.random() < 0.5:
-                if strength > 2*pot_odds:
+                if strength > 1.5*pot_odds:
                     raise_amount = int(min_raise + 0.1 * (max_raise - min_raise))
                     return RaiseAction(raise_amount)
                 return RaiseAction(min_raise)
