@@ -6,6 +6,7 @@ from skeleton.states import GameState, TerminalState, RoundState
 from skeleton.states import NUM_ROUNDS, STARTING_STACK, BIG_BLIND, SMALL_BLIND
 from skeleton.bot import Bot
 from skeleton.runner import parse_args, run_bot
+from opponent_update import OpponentProfile
 
 import random
 
@@ -28,7 +29,9 @@ class Player(Bot):
         Returns:
         Nothing.
         '''
-        pass
+        self.opponent = OpponentProfile()
+        self.my_bounty = None
+        self.big_blind = False
 
     def handle_new_round(self, game_state, round_state, active):
         '''
@@ -46,10 +49,11 @@ class Player(Bot):
         #game_clock = game_state.game_clock  # the total number of seconds your bot has left to play this game
         #round_num = game_state.round_num  # the round number from 1 to NUM_ROUNDS
         my_cards = round_state.hands[active]  # your cards
-        #big_blind = bool(active)  # True if you are the big blind
-        #my_bounty = round_state.bounties[active]  # your current bounty rank
+        self.big_blind = bool(active)  # True if you are the big blind
+        self.my_bounty = round_state.bounties[active]  # your current bounty rank
         
         self.strong_hole = False
+        self.my_bounty_hit = False
         card1 = my_cards[0] # '9s', 'Ad', 'Th'
         card2 = my_cards[1] 
 
@@ -60,6 +64,10 @@ class Player(Bot):
 
         if rank1 == rank2 or ((rank1 in "AKQJ") and (rank2 in "AKQJ")):
             self.strong_hole = True
+
+    def is_bounty_hit(self, my_cards, board_cards):
+        self.my_bounty_hit = self.my_bounty in [r[0] for r in my_cards + board_cards]
+        return self.my_bounty_hit
 
     def handle_round_over(self, game_state, terminal_state, active):
         '''
@@ -75,18 +83,20 @@ class Player(Bot):
         '''
         #my_delta = terminal_state.deltas[active]  # your bankroll change from this round
         previous_state = terminal_state.previous_state  # RoundState before payoffs
-        #street = previous_state.street  # 0, 3, 4, or 5 representing when this round ended
+        street = previous_state.street  # 0, 3, 4, or 5 representing when this round ended
         #my_cards = previous_state.hands[active]  # your cards
-        #opp_cards = previous_state.hands[1-active]  # opponent's cards or [] if not revealed
+        opp_cards = previous_state.hands[1-active]  # opponent's cards or [] if not revealed
         
-        my_bounty_hit = terminal_state.bounty_hits[active]  # True if you hit bounty
+        self.my_bounty_hit = terminal_state.bounty_hits[active]  # True if you hit bounty
         opponent_bounty_hit = terminal_state.bounty_hits[1-active] # True if opponent hit bounty
         bounty_rank = previous_state.bounties[active]  # your bounty rank
 
         # The following is a demonstration of accessing illegal information (will not work)
         opponent_bounty_rank = previous_state.bounties[1-active]  # attempting to grab opponent's bounty rank
 
-        if my_bounty_hit:
+        self.opponent.add_showdown_hand(eval7.evaluate([eval7.Card(card) for card in opp_cards+previous_state.deck[:street+1]]))
+
+        if self.my_bounty_hit:
             print("I hit my bounty of " + bounty_rank + "!")
         if opponent_bounty_hit:
             print("Opponent hit their bounty of " + opponent_bounty_rank + "!")
@@ -189,13 +199,50 @@ class Player(Bot):
         my_contribution = STARTING_STACK - my_stack  # the number of chips you have contributed to the pot
         opp_contribution = STARTING_STACK - opp_stack  # the number of chips your opponent has contributed to the pot
 
+        isRaise, amount = False, 0
+        if street == 0:
+            if opp_pip > 2:
+                self.opponent.raised_preflop = True
+                isRaise, amount = True, opp_pip
+            self.opponent.update_aggression(isRaise, amount)
+        else:
+            # post-flop
+            
+            # Calculate opponent's last action
+            if self.big_blind and opp_pip == 0: # was a check
+                isRaise = False
+            elif self.big_blind and opp_pip > 0:
+                isRaise, amount = True, opp_pip
+            elif opp_pip == 0 or opp_pip == my_pip:
+                isRaise = False
+            else:
+                isRaise, amount = True, opp_pip
+
+            self.opponent.update_aggression(isRaise)
+            self.opponent.update_continuation_bet(self.opponent.raised_preflop, isRaise)
+
+        print(street, self.opponent.raised_preflop, my_pip, opp_pip)
+
         strength = 0
         if len(board_cards) == 5:
             strength = self.calculate_strength(my_cards, board_cards)
         elif len(board_cards) > 2:
             strength = self.calculate_pot_odds(my_cards, board_cards)
 
-        pot_odds = continue_cost / (my_pip + opp_pip + 0.1)
+        tightness = self.opponent.estimate_tightness()
+        # if self.opponent.aggression_frequency < 0.3:  # Passive opponent
+        #     return 'bluff' if strength > 0.5 else CheckAction()
+        # elif self.opponent.aggression_frequency > 0.7:  # Aggressive opponent
+        #     return 'slow-play' if tightness == 'loose' and strength > 0.8 else 'bet'
+        # else:  # Balanced opponent
+        #     return 'bet' if strength > 0.6 else CheckAction()
+
+        pot_odds = 0
+        if my_pip:
+            pot_odds = continue_cost / (my_pip + opp_pip + continue_cost)
+
+        if self.is_bounty_hit(my_cards, board_cards):
+            pot_odds = continue_cost / (my_pip + opp_pip + opp_pip * 0.5 + 10 + continue_cost)
         
         if RaiseAction in legal_actions:
            min_raise, max_raise = round_state.raise_bounds()  # the smallest and largest numbers of chips for a legal bet/raise
@@ -204,22 +251,31 @@ class Player(Bot):
 
         if RaiseAction in legal_actions and self.strong_hole is True:
 
-            for card in my_cards + board_cards:
-                if card[0] == my_bounty:
-                    return RaiseAction(max_raise)
+            if self.is_bounty_hit:
+                return RaiseAction(max_raise)
 
             raise_prob = 0.8
-            raise_amt = int(min_raise + (max_raise - min_raise) * 0.1)
+            raise_amt = int(min_raise + (max_raise - min_raise) * 0.2)
 
             if random.random() < raise_prob:
                 return RaiseAction(raise_amt)
         
         if RaiseAction in legal_actions:
-            if random.random() < 0.5:
+            if self.opponent.aggression_frequency < 0.3:  # Passive opponent
                 if strength > 1.5*pot_odds:
-                    raise_amount = int(min_raise + 0.1 * (max_raise - min_raise))
-                    return RaiseAction(raise_amount)
-                return RaiseAction(min_raise)
+                    if random.random() < 0.7:
+                        raise_amount = int(min_raise + 0.1 * (max_raise - min_raise))
+                        return RaiseAction(raise_amount)
+                    return RaiseAction(min_raise)
+            elif self.opponent.aggression_frequency > 0.7:  # Aggressive opponent
+                return RaiseAction(int(min_raise + 0.1 * (max_raise - min_raise))) if tightness == 'loose' and strength > 0.8 else RaiseAction(min_raise) 
+
+            else:  # Balanced opponent
+                if random.random() < 0.5:
+                    if strength > 1.5*pot_odds:
+                        raise_amount = int(min_raise + 0.1 * (max_raise - min_raise))
+                        return RaiseAction(raise_amount)
+                    return RaiseAction(min_raise)
         if CheckAction in legal_actions:  # check-call
             return CheckAction()
         if random.random() < 0.25:
