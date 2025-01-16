@@ -5,6 +5,8 @@ PLAYER_1_PATH = "./python_skeleton"
 # NO TRAILING SLASHES ARE ALLOWED IN PATHS
 PLAYER_2_NAME = "B"
 PLAYER_2_PATH = "./python_skeleton_base"  # Change this to './player_chatbot' to interact with your own bot!
+# PLAYER_2_PATH = "./player_chatbot"  # Change this to './player_chatbot' to interact with your own bot!
+
 # GAME PROGRESS IS RECORDED HERE
 GAME_LOG_FILENAME = "gamelog"
 # PLAYER_LOG_SIZE_LIMIT IS IN BYTES
