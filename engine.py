@@ -135,7 +135,7 @@ class RoundState(namedtuple('_RoundState', ['button', 'street', 'pips', 'stacks'
                 - List of deltas (positive for winner, negative for loser)
                 - Tuple of bounty hit results for both players
                 - Reference to the previous game state
-        
+
         Note:
             This method assumes both players have equal stacks when reaching showdown,
             which is enforced by an assertion.
@@ -150,7 +150,7 @@ class RoundState(namedtuple('_RoundState', ['button', 'street', 'pips', 'stacks'
         else:
             # split the pot
             delta = self.get_delta(2)
-        
+
         return TerminalState([int(delta), -int(delta)], self.get_bounty_hits(), self)
 
     def legal_actions(self):
@@ -571,6 +571,9 @@ class Game():
             bounties = bounties[::-1]
         self.log.append('')
         self.log.append('Final' + STATUS(players))
+        print('\nRESULT' + STATUS(players))
+        print()
+
         for player in players:
             player.stop()
         name = GAME_LOG_FILENAME + '.txt'

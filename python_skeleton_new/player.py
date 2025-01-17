@@ -27,7 +27,9 @@ class Player(Bot):
         Returns:
         Nothing.
         '''
-        pass
+        # pass
+        self.raise_amount = 0
+        self.raise_prob = 0.2
 
     def handle_new_round(self, game_state, round_state, active):
         '''
@@ -135,6 +137,27 @@ class Player(Bot):
 
         return win_rate
 
+    def get_raise_amount(self, game_state, round_state, active, max_raise, min_raise):
+        '''
+        Calculate the raise amount.
+
+        Arguments:
+        game_state: the GameState object.
+        round_state: the RoundState object.
+        active: your player's index.
+
+        Returns:
+        The raise amount.
+        '''
+        # You can use this information to make more informed decisions about when to raise.
+        # For example, you could consider the opponent's betting behavior, the current betting amount,
+        # or the size of your stack.
+
+        p = 0.9
+        raise_amount = int(min_raise * p + max_raise * (1 - p))
+
+        return raise_amount
+
 
     def get_action(self, game_state, round_state, active):
         '''
@@ -162,8 +185,10 @@ class Player(Bot):
         my_contribution = STARTING_STACK - my_stack  # the number of chips you have contributed to the pot
         opp_contribution = STARTING_STACK - opp_stack  # the number of chips your opponent has contributed to the pot
 
+        print()
         strength = self.calculate_strength(my_cards, board_cards)
         pot_odds = continue_cost / (my_pip + opp_pip + 0.1)
+        print(f"strength: {strength}, pot odds: {pot_odds}")
 
         if RaiseAction in legal_actions:
            min_raise, max_raise = round_state.raise_bounds()  # the smallest and largest numbers of chips for a legal bet/raise
@@ -176,16 +201,22 @@ class Player(Bot):
                 if card[0] == my_bounty:
                     return RaiseAction(max_raise)
 
-            raise_prob = 0.8
-            raise_amt = int(min_raise + (max_raise - min_raise) * 0.1)
+            raise_prob = 1
+            # raise_amt = int(min_raise + (max_raise - min_raise) * 0.1)
+            raise_amt = self.get_raise_amount(game_state, round_state, active, max_raise, min_raise)
 
-            if random.random() < raise_prob:
+            # random_raise_amt = int(raise_amt * (1 + random.uniform(-0.1, 0.1)))
+            # print(f"random raise amount: {random_raise_amt}, raise amount: {raise_amt}")
+            # print(random.random())
+
+            if random.random() < self.raise_prob:
                 return RaiseAction(raise_amt)
 
         if RaiseAction in legal_actions:
             if random.random() < 0.5:
                 if strength > 2*pot_odds:
-                    raise_amount = int(min_raise + 0.1 * (max_raise - min_raise))
+                    print("HEREEEEE")
+                    raise_amount = self.get_raise_amount(game_state, round_state, active, max_raise, min_raise)
                     return RaiseAction(raise_amount)
                 return RaiseAction(min_raise)
         if CheckAction in legal_actions:  # check-call
