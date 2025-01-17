@@ -5,6 +5,7 @@ PLAYER_1_PATH = "./python_skeleton"
 # NO TRAILING SLASHES ARE ALLOWED IN PATHS
 PLAYER_2_NAME = "B"
 PLAYER_2_PATH = "./python_skeleton_base"  # Change this to './player_chatbot' to interact with your own bot!
+# PLAYER_2_PATH = "./python_skeleton_1"  # Change this to './player_chatbot' to interact with your own bot!
 # PLAYER_2_PATH = "./player_chatbot"  # Change this to './player_chatbot' to interact with your own bot!
 
 # GAME PROGRESS IS RECORDED HERE
@@ -18,7 +19,7 @@ BUILD_TIMEOUT = 10.0
 CONNECT_TIMEOUT = 10.0
 # THE GAME VARIANT FIXES THE PARAMETERS BELOW
 # CHANGE ONLY FOR TRAINING OR EXPERIMENTATION
-NUM_ROUNDS = 1000
+NUM_ROUNDS = 10000
 STARTING_STACK = 400
 BIG_BLIND = 2
 SMALL_BLIND = 1

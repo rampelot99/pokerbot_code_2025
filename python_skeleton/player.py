@@ -8,6 +8,10 @@ from skeleton.bot import Bot
 from skeleton.runner import parse_args, run_bot
 
 import random
+import numpy as np
+import json
+import os
+from collections import defaultdict
 
 import eval7
 from deuces import Deck, Evaluator, Card
@@ -15,216 +19,356 @@ from deuces import Deck, Evaluator, Card
 
 class Player(Bot):
     '''
-    A pokerbot.
+    A pokerbot using Q-learning for decision making.
     '''
 
     def __init__(self):
         '''
-        Called when a new game starts. Called exactly once.
-
-        Arguments:
-        Nothing.
-
-        Returns:
-        Nothing.
+        Initialize Q-learning parameters and state-action value table.
         '''
-        pass
+        self.q_table_file = "q_values.json"
+        self.load_q_table()
+        
+        self.initial_epsilon = 0.1
+        self.min_epsilon = 0.01
+        self.epsilon_decay = 0.997
+        self.current_round = 0
+        
+        self.alpha = 0.1    # learning rate
+        self.gamma = 0.9    # discount factor
+        self.evaluator = Evaluator()
+        
+        # Track opponent patterns
+        self.episode_memory = []
+        self.opponent_aggression = 0.0
+        self.opponent_vpip = 0.0
+        self.hands_played = 0
+
+    def load_q_table(self):
+        """Load Q-table from file if it exists, otherwise create new."""
+        try:
+            with open(self.q_table_file, 'r') as f:
+                self.q_table = defaultdict(lambda: defaultdict(float))
+                saved_table = json.load(f)
+                for state in saved_table:
+                    for action, value in saved_table[state].items():
+                        self.q_table[state][action] = value
+        except (FileNotFoundError, json.JSONDecodeError):
+            self.q_table = defaultdict(lambda: defaultdict(float))
+
+    def save_q_table(self):
+        """Save Q-table to file."""
+        with open(self.q_table_file, 'w') as f:
+            # Convert defaultdict to regular dict for JSON serialization
+            table_dict = {k: dict(v) for k, v in self.q_table.items()}
+            json.dump(table_dict, f)
+
+    def get_epsilon(self):
+        """Get current epsilon value with decay."""
+        return max(self.min_epsilon, 
+                  self.initial_epsilon * (self.epsilon_decay ** self.current_round))
+
+    def get_state_key(self, game_state, round_state, active):
+        """Create a discrete state representation."""
+        position = "BB" if bool(active) else "SB"
+        street = round_state.street
+        
+        # Enhanced hand strength calculation
+        hole_cards = round_state.hands[active]
+        board_cards = round_state.deck[:5] if hasattr(round_state, 'deck') else []
+        hand_strength = self.evaluate_hand(hole_cards, board_cards)
+        
+        # Pot and stack information
+        pot_size = round_state.pips[0] + round_state.pips[1]
+        stack_ratio = min(1.0, round_state.stacks[active] / STARTING_STACK)
+        pot_odds = round_state.pips[1-active] / (pot_size + round_state.pips[1-active]) if pot_size > 0 else 0
+        
+        # Opponent patterns
+        opp_pattern = "A" if self.opponent_aggression > 0.6 else "P" if self.opponent_aggression < 0.4 else "N"
+        
+        # Bounty information
+        has_bounty = self.check_bounty_hit(round_state.bounties[active], hole_cards, board_cards)
+        
+        return f"{position}_{street}_{hand_strength}_{pot_size}_{stack_ratio:.1f}_{pot_odds:.2f}_{opp_pattern}_{has_bounty}"
+
+    def evaluate_hand(self, hole_cards, board_cards):
+        """Evaluate hand strength on a scale of 0-9."""
+        if not board_cards:
+            # Preflop hand evaluation
+            ranks = sorted([Card.get_rank_int(Card.new(card)) for card in hole_cards])
+            suited = hole_cards[0][1] == hole_cards[1][1]
+            
+            # Premium hands
+            if ranks[0] == ranks[1]:  # Pairs
+                if ranks[0] >= 10:  # TT+
+                    return 9
+                elif ranks[0] >= 7:  # 77-99
+                    return 8
+                return 7
+            
+            # High card hands
+            if suited:
+                if ranks[1] == 12:  # Ax suited
+                    return 8
+                if ranks[1] == 11 and ranks[0] >= 9:  # KJs+
+                    return 7
+                if abs(ranks[0] - ranks[1]) == 1 and ranks[0] >= 8:  # High suited connectors
+                    return 7
+                if ranks[1] >= 10:  # Other suited high cards
+                    return 6
+                return 5
+            else:
+                if ranks[1] == 12 and ranks[0] >= 9:  # AK-AT
+                    return 7
+                if ranks[1] == 11 and ranks[0] >= 9:  # KQ-KT
+                    return 6
+                if ranks[1] >= 10 and ranks[0] >= 9:  # High cards
+                    return 5
+            return 4
+        
+        # Postflop evaluation
+        deuces_cards = [Card.new(card) for card in hole_cards + board_cards]
+        score = self.evaluator.evaluate(deuces_cards[:2], deuces_cards[2:])
+        percentile = 1 - (score / 7462)  # Convert score to percentile
+        return min(9, int(percentile * 10))
+
+    def check_bounty_hit(self, bounty, hole_cards, board_cards):
+        """Check if current hand hits the bounty."""
+        if not bounty:
+            return False
+        all_cards = hole_cards + board_cards
+        return any(Card.get_rank_int(Card.new(card)) == bounty for card in all_cards)
+
+    def select_action(self, state_key, legal_actions):
+        """Choose action using epsilon-greedy policy."""
+        if random.random() < self.get_epsilon():
+            return random.choice(legal_actions)
+        
+        # Get Q-values for all legal actions
+        q_values = {action: self.q_table[state_key][str(action)] for action in legal_actions}
+        
+        # Choose action with highest Q-value
+        return max(q_values.items(), key=lambda x: x[1])[0]
+
+    def update_q_value(self, state, action, next_state, reward):
+        """Update Q-value using Q-learning update rule."""
+        if state and action:  # Only update if we have a previous state-action pair
+            old_q = self.q_table[state][str(action)]
+            
+            # For terminal states or states we haven't seen before, use 0 as the future value
+            if next_state == "terminal" or not self.q_table[next_state]:
+                next_max_q = 0
+            else:
+                # Get all Q-values in the next state
+                next_q_values = [self.q_table[next_state][str(a)] for a in self.q_table[next_state]]
+                next_max_q = max(next_q_values) if next_q_values else 0
+            
+            # Update Q-value using the Q-learning formula
+            new_q = old_q + self.alpha * (reward + self.gamma * next_max_q - old_q)
+            self.q_table[state][str(action)] = new_q
 
     def handle_new_round(self, game_state, round_state, active):
         '''
-        Called when a new round starts. Called NUM_ROUNDS times.
-
-        Arguments:
-        game_state: the GameState object.
-        round_state: the RoundState object.
-        active: your player's index.
-
-        Returns:
-        Nothing.
+        Called when a new round starts.
         '''
-        #my_bankroll = game_state.bankroll  # the total number of chips you've gained or lost from the beginning of the game to the start of this round
-        #game_clock = game_state.game_clock  # the total number of seconds your bot has left to play this game
-        #round_num = game_state.round_num  # the round number from 1 to NUM_ROUNDS
-        my_cards = round_state.hands[active]  # your cards
-        #big_blind = bool(active)  # True if you are the big blind
-        #my_bounty = round_state.bounties[active]  # your current bounty rank
+        self.last_state = None
+        self.last_action = None
+        self.load_q_table()
+        self.current_round += 1
+
+    def get_action_wrapper(self, game_state, round_state, active):
+        """Wrapper for getting actions with Q-learning updates."""
+        # Create state representation
+        current_state = self.get_state_key(game_state, round_state, active)
         
-        self.strong_hole = False
-        card1 = my_cards[0] # '9s', 'Ad', 'Th'
-        card2 = my_cards[1] 
-
-        rank1 = card1[0]
-        suit1 = card1[1]
-        rank2 = card2[0]
-        suit2 = card2[1]
-
-        if rank1 == rank2 or ((rank1 in "AKQJ") and (rank2 in "AKQJ")):
-            self.strong_hole = True
+        # Get legal actions
+        legal_actions = []
+        my_pip = round_state.pips[active]
+        continue_cost = round_state.pips[1-active] - my_pip
+        
+        if continue_cost == 0:
+            legal_actions.append(CheckAction())
+        else:
+            legal_actions.append(FoldAction())
+            legal_actions.append(CallAction())
+            
+        # Can only raise if we have chips left
+        if round_state.stacks[active] > continue_cost:
+            min_raise, max_raise = round_state.raise_bounds()
+            possible_raises = range(min_raise, max_raise + 1)
+            legal_actions += [RaiseAction(raise_amount) for raise_amount in possible_raises]
+        
+        # Choose action using epsilon-greedy with decay
+        if random.random() < self.get_epsilon():
+            action = random.choice(legal_actions)
+        else:
+            q_values = {action: self.q_table[current_state][str(action)] for action in legal_actions}
+            action = max(q_values.items(), key=lambda x: x[1])[0]
+        
+        # Store transition for later updates
+        if self.last_state is not None:
+            self.episode_memory.append({
+                'state': self.last_state,
+                'action': self.last_action,
+                'next_state': current_state,
+                'reward': 0  # Will be updated in handle_round_over
+            })
+        
+        # Store current state and action for next transition
+        self.last_state = current_state
+        self.last_action = action
+        
+        return action
 
     def handle_round_over(self, game_state, terminal_state, active):
         '''
-        Called when a round ends. Called NUM_ROUNDS times.
-
-        Arguments:
-        game_state: the GameState object.
-        terminal_state: the TerminalState object.
-        active: your player's index.
-
-        Returns:
-        Nothing.
+        Called when a round ends. Update Q-values with final reward.
         '''
-        #my_delta = terminal_state.deltas[active]  # your bankroll change from this round
-        previous_state = terminal_state.previous_state  # RoundState before payoffs
-        #street = previous_state.street  # 0, 3, 4, or 5 representing when this round ended
-        #my_cards = previous_state.hands[active]  # your cards
-        #opp_cards = previous_state.hands[1-active]  # opponent's cards or [] if not revealed
-        
-        my_bounty_hit = terminal_state.bounty_hits[active]  # True if you hit bounty
-        opponent_bounty_hit = terminal_state.bounty_hits[1-active] # True if opponent hit bounty
-        bounty_rank = previous_state.bounties[active]  # your bounty rank
-
-        # The following is a demonstration of accessing illegal information (will not work)
-        opponent_bounty_rank = previous_state.bounties[1-active]  # attempting to grab opponent's bounty rank
-
-        if my_bounty_hit:
-            print("I hit my bounty of " + bounty_rank + "!")
-        if opponent_bounty_hit:
-            print("Opponent hit their bounty of " + opponent_bounty_rank + "!")
-
-    def calculate_strength(self, my_cards, board_cards):
-        print(f"my cards: {my_cards}")
-        print(f"board cards: {board_cards}")
-        
-        # define amount of times we want to do monte-carlo iterations
-        MC_ITER = 100
-        
-        deck = Deck()
-        evaluator = Evaluator()
-        my_hand = [Card.new(card) for card in my_cards]
-        community_cards = [Card.new(card) for card in board_cards]
+        if self.episode_memory:
+            # Calculate final reward with pot odds consideration
+            final_reward = terminal_state.deltas[active]
             
-        score = 0
-        for _ in range(MC_ITER):
+            # Update opponent statistics
+            self.hands_played += 1
+            if terminal_state.deltas[1-active] > 0:
+                self.opponent_aggression = (self.opponent_aggression * (self.hands_played - 1) + 
+                                        (1 if final_reward < 0 else 0)) / self.hands_played
             
-            deck.shuffle()
-            for card in my_hand + community_cards:
-                deck.cards.remove(card)
-
-            opp_draw = deck.draw(2)
+            # Add bounty bonus if applicable
+            # if terminal_state.previous_state and hasattr(terminal_state.previous_state, 'deck'):
+            #     if self.check_bounty_hit(terminal_state.previous_state.bounties[active],
+            #                         terminal_state.previous_state.hands[active],
+            #                         terminal_state.previous_state.deck[:5]):
+            #         final_reward = 1.5 * final_reward + 20  # Increased bounty bonus
             
-            my_value = evaluator.evaluate(my_hand, community_cards)
-            opp_value = evaluator.evaluate(opp_draw, community_cards)
+            # Scale reward based on pot size
+            pot_size = sum(terminal_state.previous_state.pips)
+            if pot_size > 0:
+                final_reward *= (1 + pot_size / STARTING_STACK)
             
-            score += (opp_value - my_value)*0.2
-        
-        win_rate = score / MC_ITER
-        print(f"win rate: {win_rate}")
-        
-        return win_rate
-    
-    def calculate_pot_odds(self, my_cards, board_cards):
-        '''
-        Count the number of cards that complete our hand (outs)
-        Multiply this number by 2 (1/52 cards gives ~2% chance of getting a specific
-        card)
-        If we have two cards left to see (turn and river), multiply by 2
-        '''
-        deck = Deck()
-        evaluator = Evaluator()
-        my_hand = [Card.new(card) for card in my_cards]
-        community_cards = [Card.new(card) for card in board_cards]
-        card_num = len(board_cards)
-        # Remove known cards from the deck
-        known_cards = my_hand + community_cards
-        for card in known_cards:
-            deck.cards.remove(card)
+            # Update all transitions with properly scaled rewards
+            for transition in self.episode_memory:
+                # Scale reward based on action type and context
+                action = transition['action']
+                pot_size = sum(terminal_state.previous_state.pips)
+                position = not bool(active)  # True if button/SB
+                round_state = transition["state"]
+                hand_strength = int(round_state.split('_')[2])
+                pot_odds = float(round_state.split('_')[5])
+                # my_pip = int(round_state.split('_')[3])
+                # continue_cost = opp_pip - my_pip 
 
-        # Simulate the turn and river (all combinations of unseen cards)
-        outs_count = 0
-        if card_num == 3:
-            for turn_card in deck.cards:
-                for river_card in [c for c in deck.cards if c != turn_card]:
-                    full_community = community_cards + [turn_card, river_card]
-                    rank = evaluator.evaluate(my_hand, full_community)
-                    # Consider high-ranking thresholds (e.g., less than 5000 is usually strong)
-                    if rank <= 5000:  # Adjust threshold for your definition of a "high" rank
-                        outs_count += 1
-            return 4 * outs_count
-        # Simulate river
-        elif card_num == 4:
-            for river_card in deck.cards:
-                full_community = community_cards + [river_card]
-                rank = evaluator.evaluate(my_hand, full_community)
-                # Consider high-ranking thresholds (e.g., less than 5000 is usually strong)
-                if rank <= 5000:  # Adjust threshold for your definition of a "high" rank
-                    outs_count += 1
-            return 2 * outs_count
-        # know all our cards
-        return evaluator.evaluate(my_hand, community_cards)
+                # pot_odds = continue_cost / (pot_size + continue_cost)
+                
+                if isinstance(action, FoldAction):
+                    # Penalize folding strong hands or when pot odds are good
+                    
+                    if hand_strength >= 7 or pot_odds < 0.2:  # Strong hand or good pot odds
+                        transition['reward'] = -5
+                    else:
+                        transition['reward'] = 0  # Small penalty for folding weak hands
+                        
+                elif isinstance(action, RaiseAction):
+                    # Reward aggressive play based on position and hand strength
+                    if position and hand_strength >= 6:  # Strong hand in position
+                        transition['reward'] = final_reward * 1.5
+                    elif hand_strength >= 8:  # Very strong hand
+                        transition['reward'] = final_reward * 1.3
+                    else:
+                        transition['reward'] = final_reward * 1.1
+                        
+                elif isinstance(action, CallAction):
+                    # Reward calls based on pot odds and hand strength
+                    if hand_strength >= int(pot_odds * 10):  # Hand strength justifies calling
+                        transition['reward'] = final_reward * 1.2
+                    else:
+                        transition['reward'] = final_reward * 0.8
+                else:
+                    transition['reward'] = final_reward
+                
+                self.update_q_value(
+                    transition['state'],
+                    transition['action'],
+                    transition['next_state'],
+                    transition['reward']
+                )
+            
+            self.save_q_table()
 
+            # Clear episode memory
+            self.episode_memory = []
 
     def get_action(self, game_state, round_state, active):
         '''
-        Where the magic happens - your code should implement this function.
-        Called any time the engine needs an action from your bot.
-
-        Arguments:
-        game_state: the GameState object.
-        round_state: the RoundState object.
-        active: your player's index.
-
-        Returns:
-        Your action.
+        Where the magic happens - the bot should return one of CallAction, CheckAction, FoldAction, or RaiseAction.
         '''
-        legal_actions = round_state.legal_actions()  # the actions you are allowed to take
-        street = round_state.street  # 0, 3, 4, or 5 representing pre-flop, flop, turn, or river respectively
-        my_cards = round_state.hands[active]  # your cards
-        board_cards = round_state.deck[:street]  # the board cards
-        my_pip = round_state.pips[active]  # the number of chips you have contributed to the pot this round of betting
-        opp_pip = round_state.pips[1-active]  # the number of chips your opponent has contributed to the pot this round of betting
-        my_stack = round_state.stacks[active]  # the number of chips you have remaining
-        opp_stack = round_state.stacks[1-active]  # the number of chips your opponent has remaining
-        continue_cost = opp_pip - my_pip  # the number of chips needed to stay in the pot
-        my_bounty = round_state.bounties[active]  # your current bounty rank
-        my_contribution = STARTING_STACK - my_stack  # the number of chips you have contributed to the pot
-        opp_contribution = STARTING_STACK - opp_stack  # the number of chips your opponent has contributed to the pot
-
-        strength = 0
-        if len(board_cards) == 5:
-            strength = self.calculate_strength(my_cards, board_cards)
-        elif len(board_cards) > 2:
-            strength = self.calculate_pot_odds(my_cards, board_cards)
-
-        pot_odds = continue_cost / (my_pip + opp_pip + 0.1)
+        # Get valid actions
+        legal_actions = round_state.legal_actions()
         
-        if RaiseAction in legal_actions:
-           min_raise, max_raise = round_state.raise_bounds()  # the smallest and largest numbers of chips for a legal bet/raise
-           min_cost = min_raise - my_pip  # the cost of a minimum bet/raise
-           max_cost = max_raise - my_pip  # the cost of a maximum bet/raise
-
-        if RaiseAction in legal_actions and self.strong_hole is True:
-
-            for card in my_cards + board_cards:
-                if card[0] == my_bounty:
-                    return RaiseAction(max_raise)
-
-            raise_prob = 0.8
-            raise_amt = int(min_raise + (max_raise - min_raise) * 0.1)
-
-            if random.random() < raise_prob:
-                return RaiseAction(raise_amt)
+        # Get current state
+        state = self.get_state_key(game_state, round_state, active)
         
+        # Get current epsilon for exploration
+        epsilon = self.get_epsilon()
+        
+        # Pot odds calculation
+        pot_size = sum(round_state.pips)
+        to_call = round_state.pips[1-active] - round_state.pips[active]
+        pot_odds = to_call / (pot_size + to_call) if pot_size + to_call > 0 else 0
+        
+        # Position advantage
+        is_button = not bool(active)
+        
+        # Calculate minimum and maximum raise
+        min_raise, max_raise = 0, 0
         if RaiseAction in legal_actions:
-            if random.random() < 0.5:
-                if strength > 1.5*pot_odds:
-                    raise_amount = int(min_raise + 0.1 * (max_raise - min_raise))
-                    return RaiseAction(raise_amount)
-                return RaiseAction(min_raise)
-        if CheckAction in legal_actions:  # check-call
-            return CheckAction()
-        if random.random() < 0.25:
+            min_raise = round_state.raise_bounds()[0]
+            max_raise = round_state.raise_bounds()[1]
+        
+        # Adjust strategy based on hand strength and position
+        hand_strength = int(state.split('_')[2])  # Get hand strength from state
+        
+        # Default to fold if hand is very weak
+        if hand_strength <= 3 and RaiseAction in legal_actions and not is_button:
             return FoldAction()
-        return CallAction()
+        
+        # More aggressive with position
+        if is_button and hand_strength >= 5:
+            if RaiseAction in legal_actions:
+                raise_amount = min(max_raise, min_raise + int(pot_size * 0.75))
+                return RaiseAction(raise_amount)
+            elif CallAction in legal_actions:
+                return CallAction()
+        
+        # Standard play
+        if random.random() < epsilon:
+            # Exploration: randomly choose an action
+            chosen_action = random.choice(list(legal_actions))
+            if chosen_action == RaiseAction:
+                raise_size = random.randint(min_raise, max_raise)
+                chosen_action = RaiseAction(raise_size)
+            else:
+                chosen_action = chosen_action()
+        else:
+            # Exploitation: choose best action from Q-table
+            chosen_action = max(legal_actions, 
+                              key=lambda x: self.q_table[state][str(x)])
+            if chosen_action == RaiseAction:
+                # Size raise based on hand strength and pot
+                raise_amount = min(max_raise, 
+                                 min_raise + int(pot_size * (0.5 + hand_strength * 0.1)))
+                chosen_action = RaiseAction(raise_amount)
+            else:
+                chosen_action = chosen_action()
+        
+        # Store state and action for learning
+        self.episode_memory.append({
+            'state': state,
+            'action': chosen_action,
+            'next_state': None,
+            'reward': 0
+        })
+        return chosen_action
 
 
 if __name__ == '__main__':
