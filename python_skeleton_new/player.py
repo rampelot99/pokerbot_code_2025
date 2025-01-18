@@ -123,7 +123,7 @@ class Player(Bot):
         return dict[rank] - 2
 
 
-    def set_bounty_aggression(self, my_cards, board_cards, strength):
+    def set_bounty_aggression(self, my_cards, board_cards):
         '''
         Calculate dynamic aggression based on bounty relevance and likelihood.
         '''
@@ -153,64 +153,6 @@ class Player(Bot):
 
 
 
-    # def get_action(self, game_state, round_state, active):
-    #     '''
-    #     Main decision function for the bot.
-    #     '''
-    #     legal_actions = round_state.legal_actions()
-    #     street = round_state.street
-    #     my_cards = [card for card in round_state.hands[active]]
-    #     board_cards = [card for card in round_state.deck[:street]]
-    #     my_pip = round_state.pips[active]
-    #     opp_pip = round_state.pips[1 - active]
-    #     my_stack = round_state.stacks[active]
-    #     pot_total = sum(round_state.pips)
-    #     continue_cost = opp_pip - my_pip
-    #     pot_odds = continue_cost / (pot_total + 0.1) if pot_total > 0 else 1.0
-
-    #     strength = self.calculate_strength(my_cards, board_cards)
-
-    #     if RaiseAction in legal_actions:
-    #         min_raise, max_raise = round_state.raise_bounds()
-
-    #     bounty_aggression = self.set_bounty_aggression(my_cards, board_cards, strength)
-    #     # Adjust aggression based on opponent profile
-    #     aggressive_tendency = self.opponent_profiles["aggressive"] / max(self.total_rounds, 1)
-    #     tight_tendency = self.opponent_profiles["tight"] / max(self.total_rounds, 1)
-
-    #     # Aggressive play for bounty and strong hands
-    #     if strength > 0.7 or any(card[0] == self.bounty_rank for card in my_cards + board_cards):
-    #         if RaiseAction in legal_actions:
-    #             option1 = max_raise
-    #             option2 = int(min_raise * bounty_aggression)
-    #             new_raise = option2 if aggressive_tendency > 0.2 else option1
-    #             new_raise = min_raise if new_raise < min_raise else max_raise if new_raise > max_raise else new_raise
-
-    #             print(f"     STRONG HAND, RAISE {new_raise}, {option1=} {option2=}" )
-    #             return RaiseAction(new_raise)
-
-    #     bluff_chance = 0.15 + (0.1 * tight_tendency)
-    #     if tight_tendency > 0.5 and random.random() < bluff_chance:
-    #         print("     BLUFF")
-    #         if RaiseAction in legal_actions:
-    #             return RaiseAction(min_raise)
-
-
-    #     # Conservative play for weak hands
-    #     if strength < 0.4 and pot_odds > strength:
-    #         print("         WEAK HAND, FOLD")
-    #         if FoldAction in legal_actions:
-    #             return FoldAction()
-
-    #     # Default to call or check
-    #     if CallAction in legal_actions and continue_cost <= my_stack * 0.1:
-    #         print("            DEFAULT CALL")
-    #         return CallAction()
-    #     if CheckAction in legal_actions:
-    #         return CheckAction()
-
-    #     print("                 DEFAULT FOLD")  # Default to fold if no other action is available.
-    #     return FoldAction()
     def get_action(self, game_state, round_state, active):
         '''
         Where the magic happens - your code should implement this function.
@@ -237,11 +179,7 @@ class Player(Bot):
         my_contribution = STARTING_STACK - my_stack  # the number of chips you have contributed to the pot
         opp_contribution = STARTING_STACK - opp_stack  # the number of chips your opponent has contributed to the pot
 
-        strength = self.calculate_strength(my_cards, board_cards)
-        # print(self.set_bounty_aggression(my_cards, board_cards, strength))
-        print(f"Strength: {strength}")
-        strength *= self.set_bounty_aggression(my_cards, board_cards, strength)
-        print(f"New Strength: {strength}")
+        strength = self.calculate_strength(my_cards, board_cards) * self.set_bounty_aggression(my_cards, board_cards)
 
         pot_odds = continue_cost / (my_pip + opp_pip + 0.1)
 
